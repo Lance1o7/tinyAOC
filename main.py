@@ -9,14 +9,20 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 
 
+def quantize_9bit(tensor):
+    tensor_scaled = torch.tanh(tensor)
+    quantized = torch.round(tensor_scaled * 255).clamp(-256, 255)
+    return quantized / 255.0
+
+
 class AOC(nn.Module):
     def __init__(self, in_dim=28 * 28, hidden=256, out_dim=10, tol=1e-3, max_iters=200):
         super().__init__()
         self.W_IP = nn.Linear(in_dim, hidden, bias=True)
         self.W_OP = nn.Linear(hidden, out_dim, bias=True)
-        # core AOC
-        self.W = nn.Parameter(torch.empty(hidden, hidden))
-        self.b = nn.Parameter(torch.zeros(hidden))
+        # core AOC with 9-bit quantization
+        self._W_raw = nn.Parameter(torch.empty(hidden, hidden))
+        self._b_raw = nn.Parameter(torch.zeros(hidden))
 
         self._alpha_raw = nn.Parameter(torch.tensor(0.0))
         self._beta_raw = nn.Parameter(torch.tensor(0.0))
@@ -27,6 +33,14 @@ class AOC(nn.Module):
         self.initialize()
 
     @property
+    def W(self):
+        return quantize_9bit(self._W_raw)
+
+    @property
+    def b(self):
+        return quantize_9bit(self._b_raw)
+
+    @property
     def alpha(self):
         return torch.sigmoid(self._alpha_raw)
 
@@ -35,16 +49,16 @@ class AOC(nn.Module):
         return torch.sigmoid(self._beta_raw)
 
     def initialize(self):
-        nn.init.kaiming_uniform_(self.W, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self._W_raw, a=math.sqrt(5))
         with torch.no_grad():
-            self.W.mul_(0.1)
+            self._W_raw.mul_(0.1)
         for layer in (self.W_IP, self.W_OP):
             nn.init.kaiming_uniform_(layer.weight, a=math.sqrt(5))
             if layer.bias is not None:
                 fan_in = layer.weight.size(1)
                 bound = 1 / math.sqrt(fan_in)
                 nn.init.uniform_(layer.bias, -bound, bound)
-        nn.init.zeros_(self.b)
+        nn.init.zeros_(self._b_raw)
 
     def forward(self, x, return_iters=False):
         B = x.size(0)
